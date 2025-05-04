@@ -1,0 +1,269 @@
+---
+
+title: "Story 6 D608"
+author: "Jose Fuentes"
+date: "2025-04-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Story 6
+
+You have been given a dataset consisting of several files describing customer purchases which
+took place at Instacart, an online grocery delivery service, during a 365 day period prior to
+2020. Your goal on this assignment is to perform a customer segmentation analysis to
+understand the different types of customer behavior exhibited by Instacart customers. You
+should use dimensionality reduction, cluster analysis, and any other tool you see fit to find
+and visualize customer segments at Instacart.
+Your data consists of a partially processed dataset that Instacart posted to kaggle for a prediction competition. Here we are using the dataset for a different purpose.
+Here is a description of the data files provided:
+1. user_features.csv This file consists of features generated from the original kaggle dataset.
+• user_id: this is a number uniquely identifying each user
+• packaged cheese to frozen juice: Columns 2:135 consistent of the name of food
+categories (called aisles in the instacart data). The value in each entry of these columns
+is the number of items from that category ordered by each customer throughout the entire
+year. This count is a little imprecise because it does not differentiate the quantity of
+items per order (which is unavailable in this data).
+• Saturday to Friday: Columns 136:142 correspond to days of the week. The values
+correspond to the number of orders each user made on a given day of the week.
+2. Official Instacart data:
+• aisles.csv: This file identifies the aisles (food categories) that correspond to each
+aisle_id
+• departments.csv: This file identifies the departments (a very rough category of product)
+that correspond to each department id. Departments and Aisles form a hierarchy, each
+food item is contained within an aisle, and each aisle is contained within a department.
+products.csv contains information on each product, including the product name, the
+aisle, and the department
+• orders.csv contains high level information about each order, including the user_id,
+the order_id, the order number of that user (whether it is the user’s 1st, 3rd, or 10th
+order etc), the day of week and hour of the day the order was made, and the number of
+days elapsed since their previous order
+• all_order_products.csv contains detailed information on each specific order, including
+all the products in that order and the order in which those products were added.
+
+
+## Including Plots
+
+``` {r story 6}
+# Load Libraries
+library(data.table)
+library(tidyverse)
+library(factoextra)
+library(cluster)
+library(patchwork)
+library(ggthemes)
+
+# Load Data Efficiently
+orders <- fread("C:/Users/Dell/Downloads/FilesDataStory6/orders.csv")
+products <- fread("C:/Users/Dell/Downloads/FilesDataStory6/products.csv")
+order_products <- fread("C:/Users/Dell/Downloads/FilesDataStory6/all_order_products.csv")
+departments <- fread("C:/Users/Dell/Downloads/FilesDataStory6/departments.csv")
+aisles <- fread("C:/Users/Dell/Downloads/FilesDataStory6/aisles.csv")
+user_features <- fread("C:/Users/Dell/Downloads/FilesDataStory6/user_features.csv")
+
+# Merge Product Information
+product_info <- products %>%
+  left_join(departments, by = "department_id") %>%
+  left_join(aisles, by = "aisle_id") %>%
+  select(product_id, product_name, department, aisle)
+
+# Merge Orders with Products
+order_history <- order_products %>%
+  left_join(orders, by = "order_id") %>%
+  left_join(product_info, by = "product_id")
+
+# Subsample for Feasibility
+set.seed(42)
+user_sample <- user_features %>% sample_n(5000)
+
+# Feature Engineering
+features_df <- order_history %>%
+  semi_join(user_sample, by = "user_id") %>%
+  group_by(user_id) %>%
+  summarise(
+    total_orders = n_distinct(order_id),
+    total_products = n(),
+    unique_products = n_distinct(product_id),
+    unique_departments = n_distinct(department),
+    most_common_aisle = names(which.max(table(aisle))),
+    avg_hour = mean(order_hour_of_day, na.rm = TRUE),
+    avg_dow = mean(order_dow, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Clean and Scale Numeric Features
+numeric_features <- features_df %>%
+  select(-user_id, -most_common_aisle) %>%
+  select(where(is.numeric)) %>%
+  select_if(~ sd(., na.rm = TRUE) > 0) %>%
+  scale()
+
+# PCA
+pca_result <- prcomp(numeric_features, center = TRUE, scale. = TRUE)
+pca_for_clustering <- as.data.frame(pca_result$x)[, 1:5]
+
+# 📉 Elbow Method
+elbow_plot <- fviz_nbclust(pca_for_clustering, kmeans, method = "wss", k.max = 10) +
+  labs(title = "Optimal Clusters: Elbow Method") +
+  theme_minimal()
+print(elbow_plot)
+
+#  KMeans Clustering
+set.seed(123)
+final_kmeans <- kmeans(pca_for_clustering, centers = 4, nstart = 25)
+
+# 🏷️ Add Cluster Info
+cluster_metadata <- features_df %>%
+  select(user_id, most_common_aisle) %>%
+  mutate(cluster = final_kmeans$cluster)
+
+#  Join Cluster Info to Orders
+order_history_labeled <- order_history %>%
+  inner_join(cluster_metadata, by = "user_id")
+
+
+# Enhanced PCA Plot with Variance Explained Labels
+variance_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2) * 100
+
+pca_plot <- fviz_pca_ind(pca_result, 
+             geom.ind = "point", 
+             pointshape = 21, 
+             pointsize = 2,
+             fill.ind = "steelblue",
+             col.ind = "black",
+             title = "PCA of Users",
+             xlab = paste0("Dim1 (", round(variance_explained[1], 1), "%)"),
+             ylab = paste0("Dim2 (", round(variance_explained[2], 1), "%)")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(pca_plot)
+ggsave("pca_plot.png", width = 8, height = 6)
+
+
+# Saving Outputs
+ggsave("elbow_plot.png", elbow_plot, width = 8, height = 5)
+ggsave("product_heatmap.png", product_heatmap, width = 10, height = 6)
+
+# Top 10 Most Sold Products
+top_products_plot <- order_history_labeled %>%
+  count(product_name, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  ggplot(aes(x = reorder(product_name, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 10 Most Sold Products", x = "Product", y = "Units Sold") +
+  theme_minimal()
+print(top_products_plot)
+ggsave("top_10_products.png", top_products_plot, width = 8, height = 5)
+
+# Clustered Heatmap by Product
+top_10_products <- order_history_labeled %>%
+  count(product_name, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  pull(product_name)
+
+clustered_heatmap <- order_history_labeled %>%
+  filter(product_name %in% top_10_products) %>%
+  group_by(cluster, product_name) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = product_name, values_from = count, values_fill = 0) %>%
+  column_to_rownames("cluster") %>%
+  as.matrix()
+
+# Normalize for visualization
+library(pheatmap)
+pheatmap(clustered_heatmap,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Clustered Heatmap: Top Products by Cluster",
+         color = colorRampPalette(c("white", "darkred"))(100))
+
+# Department Clustered Heatmap (
+dept_heatmap <- order_history_labeled %>%
+  count(cluster, department) %>%  # Aggregate by cluster
+  pivot_wider(names_from = department, values_from = n, values_fill = 0) %>%
+  column_to_rownames("cluster") %>%
+  as.matrix()
+
+# Plot with annotations
+library(pheatmap)
+pheatmap(dept_heatmap,
+         scale = "column",  # Normalize by column (departments)
+         clustering_method = "ward.D2",
+         color = colorRampPalette(c("white", "navy"))(100),
+         main = "Department Preferences by Cluster (Normalized)",
+         angle_col = 45,
+         fontsize_row = 10,
+         fontsize_col = 8)
+
+# Top Products Clustered Heatmap 
+product_heatmap_enhanced <- order_history_labeled %>%
+  group_by(cluster, product_name) %>%
+  tally() %>%
+  group_by(cluster) %>%
+  slice_max(n, n = 10) %>%  # Increase to top 10 products per cluster
+  pivot_wider(names_from = product_name, values_from = n, values_fill = 0) %>%
+  column_to_rownames("cluster") %>%
+  as.matrix()
+
+pheatmap(product_heatmap_enhanced,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         clustering_method = "ward.D2",
+         color = colorRampPalette(c("white", "darkred"))(100),
+         main = "Product Preferences (Hierarchical Clustering)",
+         show_colnames = TRUE,
+         fontsize_col = 7,
+         angle_col = 45)
+
+#product-day heatmap
+# Add tidytext for advanced reordering (if not installed: install.packages("tidytext"))
+library(tidytext)
+
+# Convert days to labels and aggregate sales
+day_labels <- c("Sunday", "Monday", "Tuesday", "Wednesday", 
+               "Thursday", "Friday", "Saturday")
+
+product_day_data <- order_history_labeled %>%
+  group_by(cluster, product_name, order_dow) %>%
+  summarise(sales = n(), .groups = "drop") %>%
+  mutate(day = factor(day_labels[order_dow + 1], levels = day_labels))
+
+# Identify top 5 products per cluster
+top_products <- product_day_data %>%
+  group_by(cluster, product_name) %>%
+  summarise(total_sales = sum(sales), .groups = "drop") %>%
+  group_by(cluster) %>%
+  slice_max(total_sales, n = 5) %>%
+  ungroup()
+
+#  Create annotated heatmap
+product_day_heatmap <- product_day_data %>%
+  inner_join(top_products, by = c("cluster", "product_name")) %>%
+  ggplot(aes(x = day, 
+             y = reorder_within(product_name, sales, cluster), 
+             fill = sales)) +
+  geom_tile(color = "gray90") +
+  scale_fill_gradientn(colors = c("white", "#FFD700", "#FF4500"),
+                       name = "Sales Count") +
+  scale_y_reordered() + # From tidytext
+  facet_wrap(~cluster, scales = "free_y", ncol = 2) +
+  labs(title = "Top Product Sales Patterns by Day and Cluster",
+       subtitle = "Showing daily sales intensity for top 5 products in each cluster",
+       x = "Day of Week",
+       y = "Product") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(face = "bold"),
+        panel.grid = element_blank())
+
+print(product_day_heatmap)
+ggsave("product_day_heatmap.png", width = 14, height = 10)
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

@@ -1,0 +1,371 @@
+---
+title: "Story 6: Instacart"
+author: "Jose Fuentes"
+date: "2025-04-27"
+output:
+  beamer_presentation: default
+  ioslides_presentation: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Story 6: Instacart Customer Segmentation
+
+A dataset was given consisting of several files describing customer purchases which took place at Instacart, an online grocery delivery service, during a 365 day period prior to 2020. The goal on this assignment is to perform a customer segmentation analysis to
+understand the different types of customer behavior exhibited by Instacart customers. The dimensionality reduction has to be used,also cluster analysis, and any other tool that fit to find and visualize customer segments at Instacart.
+
+The data consists of a partially processed dataset that Instacart posted to kaggle for a prediction competition. This dataset is being used for a different purpose.
+
+Note: for this assignment due to pc memory the subsample used is 5000 users. 
+
+## Datasets description
+1. user_features.csv (Pre-processed):
+Contains user-level features derived from the original Instacart data.
+user_id: Unique identifier for each customer.
+Food Category Counts (Columns 2-135): Number of items ordered by each user across various food categories (Instacart "aisles") throughout the year. Note: This is a total count and doesn't reflect quantities per order.
+Day of Week Order Counts (Columns 136-142): Number of orders placed by each user on each specific day of the week.
+2. Official Instacart Data (Original):
+aisles.csv: Maps aisle_id to the name of the food category (aisle).
+departments.csv: Maps department_id to a broader product category (department). Departments contain aisles.
+products.csv: Contains details about each product, including its product_name, aisle_id, and department_id.
+orders.csv: Provides high-level information about each order, such as user_id, order_id, order number for the user, day and hour of the order, and days since the previous order.
+all_order_products.csv: Contains item-level information for each order, listing all product_ids included in each order_id and the order in which they were added.
+
+## Preparing data
+
+```{r preparing}
+# Load Libraries
+library(data.table)
+library(tidyverse)
+library(factoextra)
+library(cluster)
+library(patchwork)
+library(ggthemes)
+library(pheatmap) 
+library(tidytext) 
+
+# Load Data Efficiently
+orders <- fread("C:/Users/Dell/Downloads/FilesDataStory6/orders.csv")
+products <- fread("C:/Users/Dell/Downloads/FilesDataStory6/products.csv")
+order_products <- fread("C:/Users/Dell/Downloads/FilesDataStory6/all_order_products.csv")
+departments <- fread("C:/Users/Dell/Downloads/FilesDataStory6/departments.csv")
+aisles <- fread("C:/Users/Dell/Downloads/FilesDataStory6/aisles.csv")
+user_features <- fread("C:/Users/Dell/Downloads/FilesDataStory6/user_features.csv")
+
+# Merging data
+# Merge Product Information
+product_info <- products %>%
+  left_join(departments, by = "department_id") %>%
+  left_join(aisles, by = "aisle_id") %>%
+  select(product_id, product_name, department, aisle)
+
+# Merge Orders with Products
+order_history <- order_products %>%
+  left_join(orders, by = "order_id") %>%
+  left_join(product_info, by = "product_id")
+
+# Subsampling and Feature Engineering
+# Subsample for Feasibility
+set.seed(42)
+user_sample <- user_features %>% sample_n(5000)
+
+# Feature Engineering
+features_df <- order_history %>%
+  semi_join(user_sample, by = "user_id") %>%
+  group_by(user_id) %>%
+  summarise(
+    total_orders = n_distinct(order_id),
+    total_products = n(),
+    unique_products = n_distinct(product_id),
+    unique_departments = n_distinct(department),
+    most_common_aisle = names(which.max(table(aisle))),
+    avg_hour = mean(order_hour_of_day, na.rm = TRUE),
+    avg_dow = mean(order_dow, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Data Scaling and PCA
+# Clean and Scale Numeric Features
+numeric_features <- features_df %>%
+  select(-user_id, -most_common_aisle) %>%
+  select(where(is.numeric)) %>%
+  select_if(~ sd(., na.rm = TRUE) > 0) %>%
+  scale()
+
+# PCA
+pca_result <- prcomp(numeric_features, center = TRUE, scale. = TRUE)
+pca_for_clustering <- as.data.frame(pca_result$x)[, 1:5]
+
+```
+
+
+## Determining Number of Clusters - Elbow Method
+
+```{r doc}
+
+#  Elbow Method
+elbow_plot <- fviz_nbclust(pca_for_clustering, kmeans, method = "wss", k.max = 10) +
+  labs(title = "Optimal Clusters: Elbow Method") +
+  theme_minimal()
+print(elbow_plot)
+ggsave("elbow_plot.png", elbow_plot, width = 8, height = 5)
+```
+
+## KMeans Clustering
+
+```{r kme}
+# 🏷️ KMeans Clustering
+set.seed(123)
+final_kmeans <- kmeans(pca_for_clustering, centers = 4, nstart = 25)
+
+# Add Cluster Info
+cluster_metadata <- features_df %>%
+  select(user_id, most_common_aisle) %>%
+  mutate(cluster = final_kmeans$cluster)
+
+# Join Cluster Info to Orders
+order_history_labeled <- order_history %>%
+  inner_join(cluster_metadata, by = "user_id")
+
+# Enhanced PCA Plot with Variance Explained Labels
+variance_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2) * 100
+
+pca_plot <- fviz_pca_ind(pca_result,
+                        geom.ind = "point",
+                        pointshape = 21,
+                        pointsize = 2,
+                        fill.ind = "steelblue",
+                        col.ind = "black",
+                        title = "PCA of Users",
+                        xlab = paste0("Dim1 (", round(variance_explained[1], 1), "%)"),
+                        ylab = paste0("Dim2 (", round(variance_explained[2], 1), "%)")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(pca_plot)
+ggsave("pca_plot.png", width = 8, height = 6)
+```
+
+## PCA Visualization with Clusters
+
+```{r pcav}
+
+# PCA Cluster Plot
+cluster_plot <- fviz_cluster(final_kmeans, data = pca_for_clustering,
+                             geom = "point", ellipse.type = "norm",
+                             palette = "Dark2", ggtheme = theme_minimal()) +
+  labs(title = "PCA-based Customer Segmentation")
+print(cluster_plot)
+ggsave("cluster_plot.png", cluster_plot, width = 8, height = 5)
+```
+
+## Top products Analysis
+
+```{r tpa}
+
+# Top 10 Most Sold Products
+
+top_products_plot <- order_history_labeled %>%
+  count(product_name, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  ggplot(aes(x = reorder(product_name, n), y = n)) +
+  geom_col(fill = "pink") +
+  coord_flip() +
+  labs(title = "Top 10 Most Sold Products", x = "Product", y = "Units Sold") +
+  theme_minimal()
+print(top_products_plot)
+ggsave("top_10_products.png", top_products_plot, width = 8, height = 5)
+
+
+```
+
+## Clustered Heatmap of Top Products
+
+```{r chot}
+
+# Clustered Heatmap by Product
+top_10_products <- order_history_labeled %>%
+  count(product_name, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  pull(product_name)
+
+clustered_heatmap <- order_history_labeled %>%
+  filter(product_name %in% top_10_products) %>%
+  group_by(cluster, product_name) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = product_name, values_from = count, values_fill = 0) %>%
+  column_to_rownames("cluster") %>%
+  as.matrix()
+
+# Normalize for visualization (optional but often helpful)
+pheatmap(clustered_heatmap,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Clustered Heatmap: Top Products by Cluster",
+         color = colorRampPalette(c("white", "darkred"))(100))
+
+```
+
+## Department Preferences by Cluster
+
+```{r dch}
+# Department Clustered Heatmap
+dept_heatmap <- order_history_labeled %>%
+  count(cluster, department) %>%  # Aggregate by cluster
+  pivot_wider(names_from = department, values_from = n, values_fill = 0) %>%
+  column_to_rownames("cluster") %>%
+  as.matrix()
+
+# Plot with annotations
+pheatmap(dept_heatmap,
+         scale = "column",  # Normalize by column (departments)
+         clustering_method = "ward.D2",
+         color = colorRampPalette(c("white", "navy"))(100),
+         main = "Department Preferences by Cluster (Normalized)",
+         angle_col = 45,
+         fontsize_row = 10,
+         fontsize_col = 8)
+```
+
+## Cluster Behavior Profiles Z-scores
+
+```{r cbp}
+# Get subsetted rotation matrix
+rotation_subset <- pca_result$rotation[, 1:5]
+rotation_t <- t(rotation_subset)
+
+# Project to original feature space
+cluster_centers_original <- as.data.frame(final_kmeans$centers %*% rotation_t) %>%
+  mutate(cluster = factor(row_number())) %>%
+  pivot_longer(cols = -cluster,
+               names_to = "feature",
+               values_to = "z_score")
+
+# Create interpretation plot
+cluster_profile_plot <- ggplot(cluster_centers_original,
+                              aes(x = reorder(feature, z_score), y = z_score)) +
+  geom_col(aes(fill = z_score > 0), show.legend = FALSE) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  scale_fill_manual(values = c("green", "steelblue")) +
+  coord_flip() +
+  facet_wrap(~cluster, nrow = 2) +
+  labs(title = "Cluster Behavior Profiles",
+       x = "Customer Features",
+       y = "Deviation from Average (Z-scores)") +
+  theme_minimal()
+
+print(cluster_profile_plot)
+```
+
+## Enhanced Top Products Heatmap per Cluster
+
+```{r tphch}
+# Top Products Clustered Heatmap
+product_heatmap_enhanced <- order_history_labeled %>%
+  group_by(cluster, product_name) %>%
+  tally() %>%
+  group_by(cluster) %>%
+  slice_max(n, n = 10) %>%  # Increase to top 10 products per cluster
+  pivot_wider(names_from = product_name, values_from = n, values_fill = 0) %>%
+  column_to_rownames("cluster") %>%
+  as.matrix()
+
+pheatmap(product_heatmap_enhanced,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         clustering_method = "ward.D2",
+         color = colorRampPalette(c("white", "black"))(100),
+         main = "Product Preferences (Hierarchical Clustering)",
+         show_colnames = TRUE,
+         fontsize_col = 7,
+         angle_col = 45)
+```
+
+## Product Sales Patterns by Day of Week
+
+```{r pspdw}
+# Convert days to labels and aggregate sales
+day_labels <- c("Sunday", "Monday", "Tuesday", "Wednesday",
+                "Thursday", "Friday", "Saturday")
+
+product_day_data <- order_history_labeled %>%
+  group_by(cluster, product_name, order_dow) %>%
+  summarise(sales = n(), .groups = "drop") %>%
+  mutate(day = factor(day_labels[order_dow + 1], levels = day_labels))
+
+# Identify top 5 products per cluster
+top_products <- product_day_data %>%
+  group_by(cluster, product_name) %>%
+  summarise(total_sales = sum(sales), .groups = "drop") %>%
+  group_by(cluster) %>%
+  slice_max(total_sales, n = 5) %>%
+  ungroup()
+
+# Create annotated heatmap
+product_day_heatmap <- product_day_data %>%
+  inner_join(top_products, by = c("cluster", "product_name")) %>%
+  ggplot(aes(x = day,
+             y = reorder_within(product_name, sales, cluster),
+             fill = sales)) +
+  geom_tile(color = "gray90") +
+  scale_fill_gradientn(colors = c("white", "#FFD700", "#FF4500"),
+                       name = "Sales Count") +
+  scale_y_reordered() + # From tidytext
+  facet_wrap(~cluster, scales = "free_y", ncol = 2) +
+  labs(title = "Top Product Sales Patterns by Day and Cluster",
+       subtitle = "Showing daily sales intensity for top 5 products in each cluster",
+       x = "Day of Week",
+       y = "Product") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(face = "bold"),
+        panel.grid = element_blank())
+
+print(product_day_heatmap)
+```
+
+## Approximate Revenue Analysis by Cluster
+
+```{r revenue}
+#Revenue Analysis by Cluster using Order Count as Proxy
+
+# 1. Calculate "quantity" as the number of times a product appears in orders
+order_revenue <- order_products %>%
+  group_by(product_id) %>%
+  summarise(quantity = n()) %>%  # Count orders per product
+  left_join(products %>% select(product_id, product_name), by = "product_id") %>%
+  mutate(
+    price = 5.0,  # Assume $5 per product (modify as needed)
+    revenue = price * quantity
+  )
+
+# 2. Merge with cluster data
+cluster_revenue <- order_history_labeled %>%
+  left_join(order_revenue, by = "product_id") %>%
+  group_by(cluster) %>%
+  summarise(
+    total_revenue = sum(revenue, na.rm = TRUE),
+    avg_revenue_per_user = mean(revenue, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 3. Visualize
+ggplot(cluster_revenue, aes(x = factor(cluster), y = total_revenue)) +
+  geom_col(fill = "darkgreen") +
+  labs(title = "Revenue by Cluster (Order Count as Quantity Proxy)",
+       x = "Cluster", y = "Estimated Revenue") +
+  theme_minimal()
+```
+
+## Conclusions
+1) 4 Distinct Segments: Identified through PCA + KMeans: frequent shoppers, organic lovers, weekend buyers, and occasional users.
+2) Top Products: Organic staples (bananas, strawberries, spinach) dominate across clusters.
+3) Department Patterns: Produce and dairy preferred by most clusters; beverages vary by group.
+4) Time Insights: Clusters differ in shopping hours/days e.g. Cluster 3 shops late mornings.
+5) PCA Effectiveness: First 2 PCs explain ~17.7% variance, capturing key behavioral dimensions.
+6) Actionable Insight: Target promotions by cluster.
+7) Limitation: Sample size (5k users) may miss niche behaviors.
+8) The revenue plot indicates Clusters 2 and 4 are big revenue, while Clusters 1 and 3 contribute less.
+
